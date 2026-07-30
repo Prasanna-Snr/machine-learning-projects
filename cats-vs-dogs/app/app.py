@@ -14,21 +14,23 @@ Features:
     - Clean, professional UI
 """
 
-import sys
 from pathlib import Path
-
-# Make sure the project root is on the Python path so src.* imports work
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 from PIL import Image
 import streamlit as st
 import torch
-from torchvision import transforms
+import torch.nn as nn
+from torchvision import models, transforms
 
-from src.model import build_model
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def build_model(num_classes: int = 2) -> nn.Module:
+    """Build a ResNet-18 model with a replaced final FC layer."""
+    model = models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +64,6 @@ INFER_TRANSFORM = transforms.Compose([
 
 st.set_page_config(
     page_title="Cats vs Dogs Classifier",
-    page_icon="🐾",
     layout="centered",
     initial_sidebar_state="expanded",
 )
@@ -71,6 +72,31 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 # Load model (cached so it is only loaded once)
 # ---------------------------------------------------------------------------
+
+def _load_folder_checkpoint(folder: Path, device) -> dict:
+    """
+    Load a state_dict from PyTorch's folder-based checkpoint format.
+    This format is produced when torch.save(state_dict, <directory>) is
+    called on PyTorch >= 2.x and the path is a directory.
+    """
+    import pickle
+
+    def persistent_load(saved_id):
+        _, dtype, key, _, numel = saved_id
+        dtype_obj = getattr(torch, dtype) if isinstance(dtype, str) else dtype.dtype
+        nbytes = numel * torch.empty(0, dtype=dtype_obj).element_size()
+        storage = torch.UntypedStorage.from_file(
+            str(folder / "data" / str(key)), False, nbytes
+        )
+        return torch.storage.TypedStorage(
+            wrap_storage=storage, dtype=dtype_obj, _internal=True
+        )
+
+    with open(folder / "data.pkl", "rb") as f:
+        unpickler = pickle.Unpickler(f)
+        unpickler.persistent_load = persistent_load
+        return unpickler.load()
+
 
 @st.cache_resource(show_spinner="Loading model...")
 def load_model():
@@ -89,17 +115,20 @@ def load_model():
 
     model = build_model(num_classes=2)
 
-    # torch.load handles both a single .pth file and the folder format
-    state = torch.load(model_path, map_location=device)
-
-    # state_dict may be stored directly or inside a dict key
-    if isinstance(state, dict):
-        sd = state.get("model_state_dict") or state.get("state_dict") or state
-        model.load_state_dict(sd)
+    # Handle both folder-format (directory) and plain .pth checkpoints
+    if model_path.is_dir():
+        sd = _load_folder_checkpoint(model_path, device)
     else:
-        # Entire model object saved (rare but possible)
-        model = state
+        state = torch.load(model_path, map_location=device, weights_only=False)
+        sd = (
+            state.get("model_state_dict")
+            or state.get("state_dict")
+            or state
+            if isinstance(state, dict)
+            else state.state_dict()
+        )
 
+    model.load_state_dict(sd)
     model.to(device)
     model.eval()
     return model, model_path, device
@@ -115,7 +144,7 @@ st.sidebar.markdown(
     "**Model:** ResNet-18 (Transfer Learning)\n\n"
     "**About**\n\n"
     "This app uses a PyTorch deep learning model to classify "
-    "images as either a **Cat** 🐱 or a **Dog** 🐶.\n\n"
+    "images as either a **Cat** or a **Dog**.\n\n"
     "Built by Prasanna Sunuwar"
 )
 
@@ -127,7 +156,7 @@ model, model_path, device = load_model()
 
 if model is None:
     st.error(
-        "❌ No trained model checkpoint found.\n\n"
+        "No trained model checkpoint found.\n\n"
         "Expected one of:\n"
         "- `models/cats_vs_dogs_resnet18/`\n"
         "- `best_model.pth`\n\n"
@@ -139,7 +168,7 @@ if model is None:
 # Main UI
 # ---------------------------------------------------------------------------
 
-st.title("🐾 Cats vs Dogs Image Classifier")
+st.title("Cats vs Dogs Image Classifier")
 st.markdown(
     "Upload a photo of a cat or a dog. "
     "The model will predict the class and show the confidence score."
@@ -177,7 +206,6 @@ if uploaded_file is not None:
         st.subheader("Prediction")
 
         badge_color = "#FF5722" if predicted_class == "Dog" else "#2196F3"
-        emoji       = "🐶" if predicted_class == "Dog" else "🐱"
 
         st.markdown(
             f"""
@@ -190,7 +218,7 @@ if uploaded_file is not None:
                 font-size:28px;
                 font-weight:bold;
             ">
-                {emoji} {predicted_class}
+                {predicted_class}
             </div>
             """,
             unsafe_allow_html=True,
@@ -218,7 +246,7 @@ if uploaded_file is not None:
 
 else:
     st.info(
-        "📂 Upload an image above to get started. "
+        "Upload an image above to get started. "
         "The classifier works best with clear, well-lit photos."
     )
     st.markdown(
